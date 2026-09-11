@@ -24,10 +24,11 @@ AI coding assistants are typically confined to writing text files and code snipp
 
 | Tool Name | Parameters | Description |
 | :--- | :--- | :--- |
-| `labs_generate_image` | `prompt`, `aspectRatio` (`1:1`, `16:9`, etc.), `outputPath` | Generates uncompressed imagery via **Imagen 3** on Google Flow / ImageFX and saves it locally. |
+| `labs_generate_video` | `prompt`, `aspectRatio` (`16:9`, `9:16`), `duration` (`10s`, `8s`, `5s`), `outputPath`, `waitForCompletion` | Generates cinematic AI video via **Gemini Omni 1.1 Flash** / **Veo 2** on Google Flow using Ultra compute. |
+| `labs_generate_image` | `prompt`, `aspectRatio` (`1:1`, `16:9`, etc.), `outputPath` | Generates uncompressed imagery via **Nano Banana Pro / 2** & **Imagen 3** on Google Flow / ImageFX and saves it locally. |
 | `labs_generate_music` | `prompt`, `outputPath`, `loop` | Prompts DeepMind's **Lyria (MusicFX)** to generate full audio tracks and stems. |
-| `labs_open_session` | `url` | Opens Chrome to `labs.google/fx/` with the dedicated MCP profile for visual inspection or one-time sign-in. |
-| `labs_status` | *(none)* | Returns active browser connection status, CDP port, and profile path. |
+| `labs_open_session` | `url` | Opens Chrome to `flow.google.com` or `labs.google/fx/` with the dedicated MCP profile for visual inspection or one-time sign-in. |
+| `labs_status` | *(none)* | Returns active browser connection status, Flow project ID, Ultra subscription status, and active models. |
 
 ---
 

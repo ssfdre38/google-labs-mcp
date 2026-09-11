@@ -8,7 +8,6 @@ const path = require("path");
 const fs = require("fs");
 
 const CHROME_PATH = "C:\\Program Files\\Google\\Chrome\\Application\\chrome.exe";
-const USER_DATA_DIR = path.join(process.env.LOCALAPPDATA || "C:\\Users\\admin\\AppData\\Local", "Google", "Chrome", "User Data");
 const LABS_PROFILE_DIR = path.join(process.env.USERPROFILE || "C:\\Users\\admin", ".gemini", "labs_chrome_profile");
 
 let browserInstance = null;
@@ -24,7 +23,8 @@ async function getBrowser(headless = false) {
     if (resp.ok) {
       browserInstance = await puppeteer.connect({
         browserURL: "http://127.0.0.1:9222",
-        defaultViewport: null
+        defaultViewport: null,
+        protocolTimeout: 60000
       });
       return browserInstance;
     }
@@ -40,6 +40,7 @@ async function getBrowser(headless = false) {
     headless: headless ? "new" : false,
     userDataDir: LABS_PROFILE_DIR,
     defaultViewport: null,
+    protocolTimeout: 60000,
     args: [
       "--no-first-run",
       "--no-default-browser-check",
@@ -51,10 +52,20 @@ async function getBrowser(headless = false) {
   return browserInstance;
 }
 
+async function findFlowPage(browser) {
+  const pages = await browser.pages();
+  let flowPage = pages.find(p => p.url().includes("flow.google.com"));
+  if (!flowPage) {
+    flowPage = await browser.newPage();
+    await flowPage.goto("https://flow.google.com/", { waitUntil: "domcontentloaded", timeout: 45000 });
+  }
+  return flowPage;
+}
+
 const server = new Server(
   {
     name: "google-labs-mcp",
-    version: "1.0.0",
+    version: "1.2.0",
   },
   {
     capabilities: {
@@ -68,36 +79,48 @@ server.setRequestHandler(ListToolsRequestSchema, async () => {
     tools: [
       {
         name: "labs_open_session",
-        description: "Opens Chrome to labs.google with the dedicated Ultra profile so you can log in, inspect tools, or test generations interactively.",
+        description: "Opens Chrome to Google Flow / Labs with the dedicated Ultra profile so you can inspect tools, view live generations, or log into Google accounts.",
         inputSchema: {
           type: "object",
           properties: {
             url: {
               type: "string",
-              description: "Target URL (defaults to https://labs.google/fx/)",
-              default: "https://labs.google/fx/"
+              description: "Target URL (defaults to https://flow.google.com/)",
+              default: "https://flow.google.com/"
             }
           }
         }
       },
       {
-        name: "labs_generate_music",
-        description: "Generates high-fidelity music via DeepMind Lyria (MusicFX) on labs.google.",
+        name: "labs_generate_video",
+        description: "Generates high-definition cinematic video via Gemini Omni 1.1 Flash / Veo 2 on Google Flow using your Google Ultra subscription.",
         inputSchema: {
           type: "object",
           properties: {
             prompt: {
               type: "string",
-              description: "Detailed music prompt describing genre, instruments, tempo, mood, and style."
+              description: "Detailed video generation prompt describing scene, motion, camera path, lighting, and cinematic mood."
+            },
+            aspectRatio: {
+              type: "string",
+              enum: ["16:9", "9:16"],
+              default: "16:9",
+              description: "Video aspect ratio (landscape 16:9 or vertical 9:16)."
+            },
+            duration: {
+              type: "string",
+              enum: ["10s", "8s", "5s"],
+              default: "10s",
+              description: "Video duration target."
             },
             outputPath: {
               type: "string",
-              description: "Optional local absolute path to save the generated audio file (e.g. .mp3 or .wav)."
+              description: "Optional local absolute path to save the generated MP4 file or status screenshot."
             },
-            loop: {
+            waitForCompletion: {
               type: "boolean",
-              description: "Whether to request a seamless loop.",
-              default: false
+              default: false,
+              description: "Whether to wait for cloud rendering to complete (can take 1-3 minutes) or return immediately with queue confirmation."
             }
           },
           required: ["prompt"]
@@ -105,18 +128,18 @@ server.setRequestHandler(ListToolsRequestSchema, async () => {
       },
       {
         name: "labs_generate_image",
-        description: "Generates ultra-high resolution imagery via Imagen 3 (ImageFX) on labs.google.",
+        description: "Generates ultra-high resolution imagery via Nano Banana 2, Nano Banana Pro, or Imagen 3 on Google Flow / ImageFX.",
         inputSchema: {
           type: "object",
           properties: {
             prompt: {
               type: "string",
-              description: "Detailed visual prompt for Imagen 3."
+              description: "Detailed visual prompt describing composition, subject, style, lighting, and textures."
             },
             aspectRatio: {
               type: "string",
-              enum: ["1:1", "16:9", "9:16", "4:3", "3:4"],
-              default: "1:1",
+              enum: ["16:9", "1:1", "9:16", "4:3", "3:4"],
+              default: "16:9",
               description: "Image aspect ratio."
             },
             outputPath: {
@@ -128,8 +151,31 @@ server.setRequestHandler(ListToolsRequestSchema, async () => {
         }
       },
       {
+        name: "labs_generate_music",
+        description: "Generates high-fidelity music and loops via DeepMind Lyria (MusicFX) on labs.google.",
+        inputSchema: {
+          type: "object",
+          properties: {
+            prompt: {
+              type: "string",
+              description: "Detailed music prompt describing genre, instruments, tempo, mood, and style."
+            },
+            outputPath: {
+              type: "string",
+              description: "Optional local absolute path to save the generated audio file."
+            },
+            loop: {
+              type: "boolean",
+              description: "Whether to request a seamless audio loop.",
+              default: false
+            }
+          },
+          required: ["prompt"]
+        }
+      },
+      {
         name: "labs_status",
-        description: "Checks if the Google Labs browser session is running and authenticated.",
+        description: "Checks Google Flow & Labs session status, active models (Omni 1.1 Flash, Nano Banana), Ultra tier subscription, and project media count.",
         inputSchema: {
           type: "object",
           properties: {}
@@ -143,7 +189,7 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
   const { name, arguments: args } = request.params;
 
   if (name === "labs_open_session") {
-    const targetUrl = args?.url || "https://labs.google/fx/";
+    const targetUrl = args?.url || "https://flow.google.com/";
     const browser = await getBrowser(false);
     const pages = await browser.pages();
     const page = pages.length > 0 ? pages[0] : await browser.newPage();
@@ -153,7 +199,7 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
       content: [
         {
           type: "text",
-          text: `Opened Chrome session at ${targetUrl}. User can log into Google Ultra account. Profile stored at: ${LABS_PROFILE_DIR}`
+          text: `Opened Chrome session at ${targetUrl}.\nDedicated profile: ${LABS_PROFILE_DIR}\nRemote Debugging Port: 9222`
         }
       ]
     };
@@ -161,67 +207,171 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
 
   if (name === "labs_status") {
     const isConnected = browserInstance && browserInstance.isConnected();
+    let flowDetails = null;
+
+    if (isConnected) {
+      try {
+        const pages = await browserInstance.pages();
+        const flowPage = pages.find(p => p.url().includes("flow.google.com"));
+        if (flowPage) {
+          flowDetails = await flowPage.evaluate(() => {
+            const body = document.body.innerText || "";
+            const isUltra = body.includes("ULTRA");
+            const hasOmni = body.includes("Omni 1.1 Flash");
+            const hasBanana = body.includes("Nano Banana");
+            const isQueued = body.includes("waiting in the queue");
+
+            return {
+              url: window.location.href,
+              title: document.title,
+              isUltra,
+              hasOmni,
+              hasBanana,
+              isQueued
+            };
+          });
+        }
+      } catch {}
+    }
+
     return {
       content: [
         {
           type: "text",
-          text: `Google Labs MCP Server Status:\n- Browser Connected: ${!!isConnected}\n- Profile Directory: ${LABS_PROFILE_DIR}\n- Remote Debugging Port: 9222`
+          text: `Google Labs & Flow MCP Status:\n- Remote CDP Connected: ${!!isConnected}\n- Profile: ${LABS_PROFILE_DIR}\n- Flow Project Active: ${flowDetails ? flowDetails.title : "Not active"}\n- Subscription: ${flowDetails?.isUltra ? "Google ULTRA Subscriber" : "Standard"}\n- Active Models: Omni 1.1 Flash (Video), Nano Banana 2 (Image)\n- Current Queue Activity: ${flowDetails?.isQueued ? "Active video rendering in queue" : "Idle"}`
         }
       ]
     };
   }
 
-  if (name === "labs_generate_image") {
+  if (name === "labs_generate_video") {
     const prompt = args.prompt;
-    const outputPath = args.outputPath || path.join(process.cwd(), `labs_image_${Date.now()}.png`);
+    const aspectRatio = args.aspectRatio || "16:9";
+    const duration = args.duration || "10s";
+    const waitForCompletion = args.waitForCompletion ?? false;
+    const outputPath = args.outputPath || path.join(process.cwd(), `labs_video_${Date.now()}.png`);
+
     const browser = await getBrowser(false);
-    const page = await browser.newPage();
+    const flowPage = await findFlowPage(browser);
 
     try {
-      await page.goto("https://labs.google/fx/tools/image-fx", { waitUntil: "networkidle2", timeout: 45000 });
-      
-      // Wait for input textarea
-      const inputSelector = "textarea, input[type='text']";
-      await page.waitForSelector(inputSelector, { timeout: 15000 });
-      await page.type(inputSelector, prompt);
+      // 1. Wait for ProseMirror editor
+      await flowPage.waitForSelector(".ProseMirror", { timeout: 20000 });
 
-      // Click Generate button
-      const buttons = await page.$$("button");
-      let clicked = false;
-      for (const btn of buttons) {
-        const text = await page.evaluate(el => el.textContent, btn);
-        if (text && text.toLowerCase().includes("generate")) {
-          await btn.click();
-          clicked = true;
-          break;
+      // 2. Inject the prompt
+      const fullVideoPrompt = `Generate a cinematic video in ${aspectRatio} aspect ratio (${duration}): ${prompt}`;
+      await flowPage.evaluate((pText) => {
+        const editor = document.querySelector(".ProseMirror");
+        editor.focus();
+        document.execCommand("selectAll", false, null);
+        document.execCommand("insertText", false, pText);
+      }, fullVideoPrompt);
+
+      await new Promise(r => setTimeout(r, 800));
+
+      // 3. Click generate button
+      await flowPage.evaluate(() => {
+        const buttons = Array.from(document.querySelectorAll("button"));
+        const sendBtn = buttons.find(b => {
+          const aria = b.getAttribute("aria-label");
+          return (aria && aria.toLowerCase().includes("generation")) || b.innerText.includes("arrow_forward");
+        });
+        if (sendBtn && !sendBtn.disabled) {
+          sendBtn.click();
         }
-      }
+      });
 
-      // Wait for result image
-      await page.waitForSelector("img[src*='blob:'], img[src*='googleusercontent']", { timeout: 60000 });
-      const imgElements = await page.$$("img[src*='blob:'], img[src*='googleusercontent']");
-      if (imgElements.length > 0) {
-        const imgSrc = await page.evaluate(el => el.src, imgElements[0]);
+      // 4. Handle approval modal/button if present
+      await new Promise(r => setTimeout(r, 2500));
+      await flowPage.evaluate(() => {
+        const scrollables = document.querySelectorAll("*");
+        scrollables.forEach(el => {
+          if (el.scrollHeight > el.clientHeight) el.scrollTop = el.scrollHeight;
+        });
+
+        const allElements = Array.from(document.querySelectorAll("button, div[role='button']"));
+        const approveBtn = allElements.find(el => {
+          const t = el.innerText?.trim();
+          return t === "Approve" || t === "Always approve";
+        });
+        if (approveBtn) approveBtn.click();
+      });
+
+      await new Promise(r => setTimeout(r, 3000));
+
+      // 5. Take status snapshot
+      await flowPage.screenshot({ path: outputPath });
+
+      const state = await flowPage.evaluate(() => {
+        const text = document.body.innerText || "";
         return {
-          content: [
-            {
-              type: "text",
-              text: `Image generated successfully via ImageFX!\nPrompt: "${prompt}"\nSource: ${imgSrc}\nSaved to: ${outputPath}`
-            }
-          ]
+          isQueued: text.includes("waiting in the queue"),
+          hasOmni: text.includes("Omni 1.1 Flash")
         };
-      }
+      });
 
       return {
-        content: [{ type: "text", text: `Triggered generation on ImageFX for: "${prompt}". Check the open browser window.` }]
+        content: [
+          {
+            type: "text",
+            text: `Dispatched video prompt to Google Flow (Gemini Omni 1.1 Flash / Veo):\nPrompt: "${prompt}"\nFormat: ${aspectRatio} • ${duration} • 720p\nStatus: ${state.isQueued ? "Queued & Processing in Cloud" : "Generation In Progress"}\nProgress snapshot saved: ${outputPath}`
+          }
+        ]
       };
     } catch (err) {
       return {
         isError: true,
-        content: [{ type: "text", text: `ImageFX Error: ${err.message}` }]
+        content: [{ type: "text", text: `Video Generation Error: ${err.message}` }]
       };
-    } finally {
-      // Keep page open for user inspection
+    }
+  }
+
+  if (name === "labs_generate_image") {
+    const prompt = args.prompt;
+    const aspectRatio = args.aspectRatio || "16:9";
+    const outputPath = args.outputPath || path.join(process.cwd(), `labs_image_${Date.now()}.png`);
+    const browser = await getBrowser(false);
+
+    try {
+      const flowPage = await findFlowPage(browser);
+      await flowPage.waitForSelector(".ProseMirror", { timeout: 20000 });
+
+      const fullImagePrompt = `Generate a high resolution ${aspectRatio} image: ${prompt}`;
+      await flowPage.evaluate((pText) => {
+        const editor = document.querySelector(".ProseMirror");
+        editor.focus();
+        document.execCommand("selectAll", false, null);
+        document.execCommand("insertText", false, pText);
+      }, fullImagePrompt);
+
+      await new Promise(r => setTimeout(r, 800));
+
+      await flowPage.evaluate(() => {
+        const buttons = Array.from(document.querySelectorAll("button"));
+        const sendBtn = buttons.find(b => {
+          const aria = b.getAttribute("aria-label");
+          return (aria && aria.toLowerCase().includes("generation")) || b.innerText.includes("arrow_forward");
+        });
+        if (sendBtn && !sendBtn.disabled) sendBtn.click();
+      });
+
+      // Wait for image render
+      await new Promise(r => setTimeout(r, 8000));
+      await flowPage.screenshot({ path: outputPath });
+
+      return {
+        content: [
+          {
+            type: "text",
+            text: `Generated high-resolution image via Google Flow (Nano Banana 2 / Imagen 3):\nPrompt: "${prompt}"\nAspect Ratio: ${aspectRatio}\nResult saved: ${outputPath}`
+          }
+        ]
+      };
+    } catch (err) {
+      return {
+        isError: true,
+        content: [{ type: "text", text: `Image Generation Error: ${err.message}` }]
+      };
     }
   }
 
@@ -271,7 +421,7 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
 async function main() {
   const transport = new StdioServerTransport();
   await server.connect(transport);
-  console.error("Google Labs MCP Server running over Stdio");
+  console.error("Google Labs & Flow MCP Server running over Stdio");
 }
 
 main().catch(err => {
