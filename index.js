@@ -3,7 +3,7 @@
 const { Server } = require("@modelcontextprotocol/sdk/server/index.js");
 const { StdioServerTransport } = require("@modelcontextprotocol/sdk/server/stdio.js");
 const { CallToolRequestSchema, ListToolsRequestSchema } = require("@modelcontextprotocol/sdk/types.js");
-const puppeteer = require("puppeteer-core");
+let puppeteer = null;
 const path = require("path");
 const fs = require("fs");
 
@@ -13,6 +13,9 @@ const LABS_PROFILE_DIR = path.join(process.env.USERPROFILE || "C:\\Users\\admin"
 let browserInstance = null;
 
 async function getBrowser(headless = false) {
+  if (!puppeteer) {
+    puppeteer = require("puppeteer-core");
+  }
   if (browserInstance && browserInstance.isConnected()) {
     return browserInstance;
   }
