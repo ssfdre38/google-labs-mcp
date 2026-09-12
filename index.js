@@ -12,6 +12,28 @@ const LABS_PROFILE_DIR = path.join(process.env.USERPROFILE || "C:\\Users\\admin"
 
 let browserInstance = null;
 
+function findFFmpeg() {
+  const { execSync } = require("child_process");
+  try {
+    const out = execSync("where.exe ffmpeg", { encoding: "utf8", stdio: ["pipe", "pipe", "ignore"] });
+    const lines = out.split("\r\n").map(l => l.trim()).filter(Boolean);
+    if (lines.length > 0) return lines[0];
+  } catch {}
+
+  const candidates = [
+    path.join(__dirname, "tools", "ffmpeg.exe"),
+    path.join(__dirname, "bin", "ffmpeg.exe"),
+    "C:\\ffmpeg\\bin\\ffmpeg.exe",
+    "C:\\ProgramData\\chocolatey\\bin\\ffmpeg.exe",
+    path.join(process.env.LOCALAPPDATA || "", "Microsoft", "WinGet", "Links", "ffmpeg.exe")
+  ];
+
+  for (const c of candidates) {
+    if (fs.existsSync(c)) return c;
+  }
+  return null;
+}
+
 async function getBrowser(headless = false) {
   if (!puppeteer) {
     puppeteer = require("puppeteer-core");
@@ -239,6 +261,51 @@ server.setRequestHandler(ListToolsRequestSchema, async () => {
             }
           },
           required: ["bundleName", "videoPrompt", "musicPrompt"]
+        }
+      },
+      {
+        name: "labs_mux_cinematic",
+        description: "Post-production media tool: muxes a Veo 2 video track with a Lyria soundtrack into a high-fidelity cinematic MP4 with synced audio using FFmpeg.",
+        inputSchema: {
+          type: "object",
+          properties: {
+            videoPath: {
+              type: "string",
+              description: "Absolute path to source video file (.mp4)."
+            },
+            audioPath: {
+              type: "string",
+              description: "Absolute path to source audio file (.mp3, .wav, .aac)."
+            },
+            outputPath: {
+              type: "string",
+              description: "Target output path for muxed cinematic MP4."
+            },
+            videoLoop: {
+              type: "boolean",
+              default: false,
+              description: "Whether to loop video if audio track is longer than video duration."
+            }
+          },
+          required: ["videoPath", "audioPath"]
+        }
+      },
+      {
+        name: "labs_export_storyboard",
+        description: "Compiles a visual storyboard HTML presentation from a sequence or bundle manifest, featuring embedded shots, duration tags, and media previews.",
+        inputSchema: {
+          type: "object",
+          properties: {
+            manifestPath: {
+              type: "string",
+              description: "Absolute path to sequence_manifest.json or bundle_manifest.json."
+            },
+            outputPath: {
+              type: "string",
+              description: "Optional output path for storyboard HTML presentation."
+            }
+          },
+          required: ["manifestPath"]
         }
       }
     ]
@@ -610,6 +677,153 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
                 `• Soundtrack (Lyria): "${args.musicPrompt}"\n` +
                 `• Manifest Created: ${manifestPath}\n` +
                 `Ready for game and application integration.`
+        }
+      ]
+    };
+  }
+
+  if (name === "labs_mux_cinematic") {
+    const videoPath = args.videoPath;
+    const audioPath = args.audioPath;
+    const outputPath = args.outputPath || path.join(path.dirname(videoPath), `cinematic_master_${Date.now()}.mp4`);
+    const videoLoop = args.videoLoop ?? false;
+
+    if (!fs.existsSync(videoPath)) {
+      return {
+        isError: true,
+        content: [{ type: "text", text: `Source video not found: ${videoPath}` }]
+      };
+    }
+    if (!fs.existsSync(audioPath)) {
+      return {
+        isError: true,
+        content: [{ type: "text", text: `Source audio not found: ${audioPath}` }]
+      };
+    }
+
+    const ffmpegPath = findFFmpeg();
+    if (!ffmpegPath) {
+      const batPath = path.join(__dirname, "tools", "download_ffmpeg.bat");
+      return {
+        isError: true,
+        content: [
+          {
+            type: "text",
+            text: `⚠️ FFmpeg was not detected on the system.\n\n` +
+                  `To enable 1-click video/audio post-production muxing:\n` +
+                  `Run the automated installer script:\n` +
+                  `  ${batPath}\n\n` +
+                  `Or install via package manager:\n` +
+                  `  winget install Gyan.FFmpeg\n` +
+                  `  choco install ffmpeg`
+          }
+        ]
+      };
+    }
+
+    const { execSync } = require("child_process");
+    try {
+      const cmd = videoLoop
+        ? `"${ffmpegPath}" -y -stream_loop -1 -i "${videoPath}" -i "${audioPath}" -c:v copy -c:a aac -b:a 192k -shortest "${outputPath}"`
+        : `"${ffmpegPath}" -y -i "${videoPath}" -i "${audioPath}" -c:v copy -c:a aac -b:a 192k -shortest "${outputPath}"`;
+
+      execSync(cmd, { stdio: ["ignore", "pipe", "pipe"] });
+
+      const stats = fs.statSync(outputPath);
+      const sizeMB = (stats.size / (1024 * 1024)).toFixed(2);
+
+      return {
+        content: [
+          {
+            type: "text",
+            text: `🎬 Cinematic Muxing Complete!\n` +
+                  `• Master Video: ${outputPath} (${sizeMB} MB)\n` +
+                  `• Video Source: ${videoPath}\n` +
+                  `• Audio Source: ${audioPath}\n` +
+                  `• Mux Engine  : ${ffmpegPath}\n` +
+                  `Audio synced with AAC 192k high bitrate.`
+          }
+        ]
+      };
+    } catch (err) {
+      return {
+        isError: true,
+        content: [{ type: "text", text: `FFmpeg Muxing Error: ${err.message}` }]
+      };
+    }
+  }
+
+  if (name === "labs_export_storyboard") {
+    const manifestPath = args.manifestPath;
+    if (!fs.existsSync(manifestPath)) {
+      return {
+        isError: true,
+        content: [{ type: "text", text: `Manifest file not found: ${manifestPath}` }]
+      };
+    }
+
+    const manifestDir = path.dirname(manifestPath);
+    const outputPath = args.outputPath || path.join(manifestDir, "storyboard_preview.html");
+    const manifest = JSON.parse(fs.readFileSync(manifestPath, "utf8"));
+
+    const title = manifest.sceneName || manifest.bundleName || "Cinematic Storyboard";
+    const shots = manifest.shots || (manifest.video ? [{ shotIndex: 1, prompt: manifest.video.prompt, targetDuration: "10s", expectedFile: manifest.video.expectedFile }] : []);
+
+    const shotsHtml = shots.map((s, idx) => `
+      <div class="card">
+        <div class="card-header">
+          <span class="badge">SHOT #${s.shotIndex || idx + 1}</span>
+          <span class="duration">${s.targetDuration || "10s"}</span>
+        </div>
+        <div class="prompt">"${s.prompt}"</div>
+        <div class="status">Status: ${s.status || "READY"}</div>
+        ${s.expectedFile && fs.existsSync(s.expectedFile) ? `
+          <video controls src="file:///${s.expectedFile.replace(/\\/g, '/')}" style="width:100%; border-radius:6px; margin-top:10px;"></video>
+        ` : `
+          <div class="placeholder">Awaiting video synthesis</div>
+        `}
+      </div>
+    `).join("");
+
+    const html = `<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <title>Storyboard // ${title}</title>
+  <style>
+    body { background: #07090e; color: #e2e8f0; font-family: system-ui, sans-serif; padding: 24px; margin: 0; }
+    h1 { color: #00e5ff; letter-spacing: 2px; text-transform: uppercase; font-size: 20px; margin-bottom: 8px; }
+    .subtitle { color: #64748b; font-size: 13px; margin-bottom: 24px; }
+    .grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(320px, 1fr)); gap: 16px; }
+    .card { background: #0d121d; border: 1px solid #1a233a; border-radius: 8px; padding: 16px; }
+    .card-header { display: flex; justify-content: space-between; align-items: center; margin-bottom: 12px; }
+    .badge { background: rgba(0,229,255,0.15); color: #00e5ff; padding: 4px 8px; border-radius: 4px; font-weight: 700; font-size: 11px; }
+    .duration { background: rgba(255,183,0,0.15); color: #ffb700; padding: 4px 8px; border-radius: 4px; font-weight: 700; font-size: 11px; }
+    .prompt { font-size: 14px; line-height: 1.5; color: #cbd5e1; margin-bottom: 8px; }
+    .status { font-size: 11px; color: #64748b; }
+    .placeholder { background: #030407; border: 1px dashed #1a233a; padding: 24px; text-align: center; color: #475569; font-size: 12px; border-radius: 6px; margin-top: 10px; }
+  </style>
+</head>
+<body>
+  <h1>🎬 Storyboard: ${title}</h1>
+  <div class="subtitle">Generated by Google Labs MCP // Veo 2 & Omni Flash Sequence Engine</div>
+  <div class="grid">
+    ${shotsHtml}
+  </div>
+</body>
+</html>`;
+
+    fs.writeFileSync(outputPath, html, "utf8");
+
+    return {
+      content: [
+        {
+          type: "text",
+          text: `📋 Visual Storyboard Exported!\n` +
+                `• Title: ${title}\n` +
+                `• Total Shots: ${shots.length}\n` +
+                `• Storyboard File: ${outputPath}\n` +
+                `Open in your browser to view all sequence shots and video previews.`
         }
       ]
     };
