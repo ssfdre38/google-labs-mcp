@@ -37,11 +37,18 @@ function findFFmpeg() {
   return null;
 }
 
+function isBrowserConnected(b) {
+  if (!b) return false;
+  if (typeof b.connected === "boolean") return b.connected;
+  if (typeof b.isConnected === "function") return b.isConnected();
+  return true;
+}
+
 async function getBrowser(headless = false) {
   if (!puppeteer) {
     puppeteer = require("puppeteer-core");
   }
-  if (browserInstance && browserInstance.isConnected()) {
+  if (browserInstance && isBrowserConnected(browserInstance)) {
     return browserInstance;
   }
 
@@ -727,10 +734,10 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
     }
 
     let browser = browserInstance;
-    if (!browser || !browser.isConnected()) {
+    if (!browser || !isBrowserConnected(browser)) {
       try { browser = await getBrowser(false); } catch {}
     }
-    const isConnected = browser && browser.isConnected();
+    const isConnected = isBrowserConnected(browser);
     let flowDetails = null;
 
     if (isConnected) {
@@ -1462,10 +1469,22 @@ async function main() {
   if (process.argv.includes("--help") || process.argv.includes("-h")) {
     console.log("Google Labs MCP - Native Multimodal & Creative Director Engine");
     console.log("Usage: google-labs [options]");
-    console.log("  --version   Show version information");
-    console.log("  --help      Show this help message");
-    console.log("  (default)   Run as Model Context Protocol (MCP) server over stdio");
+    console.log("  --bridge, -b  Run persistent WebSocket bridge daemon on port 18885");
+    console.log("  --version     Show version information");
+    console.log("  --help        Show this help message");
+    console.log("  (default)     Run as Model Context Protocol (MCP) server over stdio");
     process.exit(0);
+  }
+
+  if (process.argv.includes("--bridge") || process.argv.includes("-b")) {
+    console.log("=================================================");
+    console.log("🌐 Google Labs Companion Bridge Daemon Online");
+    console.log("   Listening on ws://127.0.0.1:18885");
+    console.log("   Health check at http://127.0.0.1:18885/health");
+    console.log("=================================================");
+    console.log("Ready for Chrome Companion Extension connections.");
+    setInterval(() => {}, 60000);
+    return;
   }
 
   const transport = new StdioServerTransport();
