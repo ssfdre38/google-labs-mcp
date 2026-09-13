@@ -13,24 +13,25 @@ const LABS_PROFILE_DIR = path.join(process.env.USERPROFILE || "C:\\Users\\admin"
 let browserInstance = null;
 
 function findFFmpeg() {
-  const { execSync } = require("child_process");
-  try {
-    const out = execSync("where.exe ffmpeg", { encoding: "utf8", stdio: ["pipe", "pipe", "ignore"] });
-    const lines = out.split("\r\n").map(l => l.trim()).filter(Boolean);
-    if (lines.length > 0) return lines[0];
-  } catch {}
-
   const candidates = [
     path.join(__dirname, "tools", "ffmpeg.exe"),
     path.join(__dirname, "bin", "ffmpeg.exe"),
+    path.join(process.env.LOCALAPPDATA || "", "Microsoft", "WinGet", "Links", "ffmpeg.exe"),
     "C:\\ffmpeg\\bin\\ffmpeg.exe",
-    "C:\\ProgramData\\chocolatey\\bin\\ffmpeg.exe",
-    path.join(process.env.LOCALAPPDATA || "", "Microsoft", "WinGet", "Links", "ffmpeg.exe")
+    "C:\\ProgramData\\chocolatey\\bin\\ffmpeg.exe"
   ];
 
   for (const c of candidates) {
     if (fs.existsSync(c)) return c;
   }
+
+  const { execSync } = require("child_process");
+  try {
+    const out = execSync("where.exe ffmpeg", { encoding: "utf8", stdio: ["ignore", "pipe", "ignore"], timeout: 3000 });
+    const lines = out.split("\r\n").map(l => l.trim()).filter(Boolean);
+    if (lines.length > 0) return lines[0];
+  } catch {}
+
   return null;
 }
 
@@ -90,7 +91,7 @@ async function findFlowPage(browser) {
 const server = new Server(
   {
     name: "google-labs-mcp",
-    version: "1.2.0",
+    version: "1.3.0",
   },
   {
     capabilities: {
@@ -376,6 +377,43 @@ server.setRequestHandler(ListToolsRequestSchema, async () => {
           },
           required: ["prompt"]
         }
+      },
+      {
+        name: "labs_stitch_sequence",
+        description: "Attaches sequential 10-second Veo 2 / Google Flow video clips into a continuous long-form video (e.g. 20s, 30s, 60s+) with optional cut, crossfade, or fade-to-black transitions and soundtrack underlay.",
+        inputSchema: {
+          type: "object",
+          properties: {
+            videoPaths: {
+              type: "array",
+              items: { type: "string" },
+              description: "Ordered array of absolute paths to video files (.mp4) to concatenate."
+            },
+            manifestPath: {
+              type: "string",
+              description: "Optional path to sequence_manifest.json or storyboard manifest containing shot paths."
+            },
+            outputPath: {
+              type: "string",
+              description: "Optional destination path for the stitched master video. Defaults to stitched_sequence_<timestamp>.mp4."
+            },
+            transition: {
+              type: "string",
+              enum: ["cut", "crossfade", "fade_black"],
+              default: "cut",
+              description: "Transition style: 'cut' (lossless stream copy, 0ms latency), 'crossfade' (smooth visual dissolve), 'fade_black' (cinematic dip to black)."
+            },
+            transitionDuration: {
+              type: "number",
+              default: 0.5,
+              description: "Duration of crossfade or fade_black transition in seconds (default: 0.5)."
+            },
+            soundtrackPath: {
+              type: "string",
+              description: "Optional path to background music or Lyria soundtrack (.mp3, .wav) to underlay across the entire stitched sequence."
+            }
+          }
+        }
       }
     ]
   };
@@ -496,6 +534,157 @@ function evaluateCreativeAsset(assetPath, originalPrompt, assetType = "auto", ru
   };
 }
 
+function probeMediaDuration(ffmpegPath, filePath, defaultDuration = 10.0) {
+  const { spawnSync } = require("child_process");
+  const ffprobeCandidate = ffmpegPath.replace(/ffmpeg\.exe$/i, "ffprobe.exe");
+  if (fs.existsSync(ffprobeCandidate)) {
+    try {
+      const res = spawnSync(ffprobeCandidate, [
+        "-v", "error",
+        "-show_entries", "format=duration",
+        "-of", "default=noprint_wrappers=1:nokey=1",
+        filePath
+      ], {
+        encoding: "utf8",
+        stdio: ["ignore", "pipe", "ignore"],
+        timeout: 12000
+      });
+      if (res.stdout) {
+        const val = parseFloat(res.stdout.trim());
+        if (!isNaN(val) && val > 0) return val;
+      }
+    } catch {}
+  }
+  return defaultDuration;
+}
+
+function stitchVideoSequence({
+  videoPaths = [],
+  manifestPath = null,
+  transition = "cut",
+  transitionDuration = 0.5,
+  soundtrackPath = null,
+  outputPath = null
+}) {
+  let resolvedPaths = [...videoPaths];
+  if (manifestPath && fs.existsSync(manifestPath)) {
+    try {
+      const manifest = JSON.parse(fs.readFileSync(manifestPath, "utf8"));
+      if (Array.isArray(manifest.shots)) {
+        for (const shot of manifest.shots) {
+          if (shot.videoPath && fs.existsSync(shot.videoPath)) {
+            resolvedPaths.push(shot.videoPath);
+          } else if (shot.outputPath && fs.existsSync(shot.outputPath)) {
+            resolvedPaths.push(shot.outputPath);
+          }
+        }
+      }
+    } catch {}
+  }
+
+  resolvedPaths = resolvedPaths.filter(p => p && fs.existsSync(p));
+  if (resolvedPaths.length === 0) {
+    throw new Error("No valid input video files provided or found.");
+  }
+
+  const ffmpegPath = findFFmpeg();
+  if (!ffmpegPath) {
+    throw new Error("FFmpeg binary not found. Please ensure FFmpeg is available in tools/ or in PATH.");
+  }
+
+  if (!outputPath) {
+    const firstDir = path.dirname(resolvedPaths[0]);
+    outputPath = path.join(firstDir, `stitched_sequence_${Date.now()}.mp4`);
+  }
+
+  const outputDir = path.dirname(outputPath);
+  if (!fs.existsSync(outputDir)) {
+    fs.mkdirSync(outputDir, { recursive: true });
+  }
+
+  const { execSync } = require("child_process");
+
+  if (transition === "cut") {
+    const concatListFile = path.join(outputDir, `concat_manifest_${Date.now()}.txt`);
+    const fileEntries = resolvedPaths.map(p => `file '${p.replace(/'/g, "'\\''")}'`).join("\n");
+    fs.writeFileSync(concatListFile, fileEntries, "utf8");
+
+    try {
+      let cmd;
+      if (soundtrackPath && fs.existsSync(soundtrackPath)) {
+        cmd = `"${ffmpegPath}" -y -f concat -safe 0 -i "${concatListFile}" -i "${soundtrackPath}" -map 0:v:0 -map 1:a:0? -c:v copy -c:a aac -b:a 192k -shortest "${outputPath}"`;
+      } else {
+        cmd = `"${ffmpegPath}" -y -f concat -safe 0 -i "${concatListFile}" -c copy "${outputPath}"`;
+      }
+      execSync(cmd, { stdio: ["ignore", "pipe", "pipe"] });
+    } catch (concatErr) {
+      let inputs = resolvedPaths.map(p => `-i "${p}"`).join(" ");
+      let filterInputs = resolvedPaths.map((_, idx) => `[${idx}:v:0]`).join("");
+      let filter = `${filterInputs}concat=n=${resolvedPaths.length}:v=1:a=0[outv]`;
+      let cmd;
+      if (soundtrackPath && fs.existsSync(soundtrackPath)) {
+        inputs += ` -i "${soundtrackPath}"`;
+        cmd = `"${ffmpegPath}" -y ${inputs} -filter_complex "${filter}" -map "[outv]" -map ${resolvedPaths.length}:a -c:v libx264 -pix_fmt yuv420p -preset fast -crf 18 -c:a aac -b:a 192k -shortest "${outputPath}"`;
+      } else {
+        cmd = `"${ffmpegPath}" -y ${inputs} -filter_complex "${filter}" -map "[outv]" -c:v libx264 -pix_fmt yuv420p -preset fast -crf 18 "${outputPath}"`;
+      }
+      execSync(cmd, { stdio: ["ignore", "pipe", "pipe"] });
+    } finally {
+      if (fs.existsSync(concatListFile)) {
+        try { fs.unlinkSync(concatListFile); } catch {}
+      }
+    }
+  } else if (transition === "crossfade" || transition === "fade_black") {
+    const durations = resolvedPaths.map(p => probeMediaDuration(ffmpegPath, p));
+    const dTrans = Math.min(transitionDuration, 2.0);
+    const xfadeType = transition === "fade_black" ? "fadeblack" : "fade";
+
+    let filterGraph = "";
+    let inputs = resolvedPaths.map(p => `-i "${p}"`).join(" ");
+    let currentDuration = durations[0];
+    let lastLabel = "0:v";
+
+    for (let i = 1; i < resolvedPaths.length; i++) {
+      const offset = Math.max(0.1, currentDuration - dTrans);
+      const outLabel = `v${i}`;
+      filterGraph += `[${lastLabel}][${i}:v]xfade=transition=${xfadeType}:duration=${dTrans}:offset=${offset.toFixed(2)}[${outLabel}];`;
+      lastLabel = outLabel;
+      currentDuration = offset + durations[i];
+    }
+    if (filterGraph.endsWith(";")) {
+      filterGraph = filterGraph.slice(0, -1);
+    }
+
+    let cmd;
+    if (soundtrackPath && fs.existsSync(soundtrackPath)) {
+      inputs += ` -i "${soundtrackPath}"`;
+      cmd = `"${ffmpegPath}" -y ${inputs} -filter_complex "${filterGraph}" -map "[${lastLabel}]" -map ${resolvedPaths.length}:a -c:v libx264 -pix_fmt yuv420p -preset fast -crf 18 -c:a aac -b:a 192k -shortest "${outputPath}"`;
+    } else {
+      cmd = `"${ffmpegPath}" -y ${inputs} -filter_complex "${filterGraph}" -map "[${lastLabel}]" -c:v libx264 -pix_fmt yuv420p -preset fast -crf 18 "${outputPath}"`;
+    }
+    execSync(cmd, { stdio: ["ignore", "pipe", "pipe"] });
+  }
+
+  const stats = fs.statSync(outputPath);
+  const sizeMB = (stats.size / (1024 * 1024)).toFixed(2);
+  const expectedTotal = transition === "cut" 
+    ? resolvedPaths.length * 10.0 
+    : Math.max(1.0, resolvedPaths.length * 10.0 - (resolvedPaths.length - 1) * transitionDuration);
+  const finalDurationSec = probeMediaDuration(ffmpegPath, outputPath, expectedTotal);
+  const durationStr = `${Math.floor(finalDurationSec / 60)}m ${(finalDurationSec % 60).toFixed(1)}s (${finalDurationSec.toFixed(1)}s total)`;
+
+  return {
+    outputPath,
+    sizeMB,
+    duration: durationStr,
+    durationSeconds: finalDurationSec,
+    clipCount: resolvedPaths.length,
+    inputFiles: resolvedPaths,
+    transition,
+    hasSoundtrack: !!soundtrackPath
+  };
+}
+
 server.setRequestHandler(CallToolRequestSchema, async (request) => {
   const { name, arguments: args } = request.params;
 
@@ -517,12 +706,16 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
   }
 
   if (name === "labs_status") {
-    const isConnected = browserInstance && browserInstance.isConnected();
+    let browser = browserInstance;
+    if (!browser || !browser.isConnected()) {
+      try { browser = await getBrowser(false); } catch {}
+    }
+    const isConnected = browser && browser.isConnected();
     let flowDetails = null;
 
     if (isConnected) {
       try {
-        const pages = await browserInstance.pages();
+        const pages = await browser.pages();
         const flowPage = pages.find(p => p.url().includes("flow.google.com"));
         if (flowPage) {
           flowDetails = await flowPage.evaluate(() => {
@@ -1155,6 +1348,41 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
     };
   }
 
+  if (name === "labs_stitch_sequence") {
+    try {
+      const result = stitchVideoSequence({
+        videoPaths: args.videoPaths || [],
+        manifestPath: args.manifestPath,
+        transition: args.transition || "cut",
+        transitionDuration: args.transitionDuration ?? 0.5,
+        soundtrackPath: args.soundtrackPath,
+        outputPath: args.outputPath
+      });
+
+      return {
+        content: [
+          {
+            type: "text",
+            text: `🎬 Video Sequence Stitched Successfully!\n` +
+                  `• Output File : ${result.outputPath}\n` +
+                  `• Total Clips : ${result.clipCount}\n` +
+                  `• Total Size  : ${result.sizeMB} MB\n` +
+                  `• Duration    : ${result.duration}\n` +
+                  `• Transition  : ${result.transition.toUpperCase()}\n` +
+                  `• Soundtrack  : ${result.hasSoundtrack ? "Muxed AAC 192k audio underlay" : "Original / None"}\n\n` +
+                  `Clips Joined:\n` +
+                  result.inputFiles.map((f, i) => `  [Shot #${i+1}] ${path.basename(f)}`).join("\n")
+          }
+        ]
+      };
+    } catch (err) {
+      return {
+        isError: true,
+        content: [{ type: "text", text: `Video Stitch Error: ${err.message}` }]
+      };
+    }
+  }
+
   return {
     isError: true,
     content: [{ type: "text", text: `Unknown tool: ${name}` }]
@@ -1163,7 +1391,7 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
 
 async function main() {
   if (process.argv.includes("--version") || process.argv.includes("-v")) {
-    console.log("google-labs-mcp v1.2.0 (Native SEA Standalone)");
+    console.log("google-labs-mcp v1.3.0 (Native SEA Standalone)");
     process.exit(0);
   }
   if (process.argv.includes("--help") || process.argv.includes("-h")) {
@@ -1180,9 +1408,11 @@ async function main() {
   console.error("Google Labs & Flow MCP Server running over Stdio");
 }
 
-main().catch((err) => {
-  console.error("Fatal error:", err);
-  process.exit(1);
-});
+if (require.main === module || process.env.NODE_SEA_EXEC === "1") {
+  main().catch((err) => {
+    console.error("Fatal error:", err);
+    process.exit(1);
+  });
+}
 
-module.exports = { evaluateCreativeAsset, server };
+module.exports = { evaluateCreativeAsset, stitchVideoSequence, server };

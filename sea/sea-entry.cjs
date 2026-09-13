@@ -45,6 +45,7 @@ function main() {
     fs.writeFileSync(hashFile, newHash, "utf8");
   }
 
+  process.env.NODE_SEA_EXEC = "1";
   const req = createRequire(destFile);
   req(destFile);
 }
