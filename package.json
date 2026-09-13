@@ -12,6 +12,7 @@
   "type": "commonjs",
   "dependencies": {
     "@modelcontextprotocol/sdk": "^1.30.0",
-    "puppeteer-core": "^25.10.0"
+    "puppeteer-core": "^25.10.0",
+    "ws": "^8.21.3"
   }
 }

@@ -6,6 +6,8 @@ const { CallToolRequestSchema, ListToolsRequestSchema } = require("@modelcontext
 let puppeteer = null;
 const path = require("path");
 const fs = require("fs");
+const { getExtensionBridge } = require("./lib/extension-bridge.js");
+const extensionBridge = getExtensionBridge(18885);
 
 const CHROME_PATH = "C:\\Program Files\\Google\\Chrome\\Application\\chrome.exe";
 const LABS_PROFILE_DIR = path.join(process.env.USERPROFILE || "C:\\Users\\admin", ".gemini", "labs_chrome_profile");
@@ -690,6 +692,18 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
 
   if (name === "labs_open_session") {
     const targetUrl = args?.url || "https://flow.google.com/";
+    if (extensionBridge.isConnected()) {
+      await extensionBridge.openOrFocusFlow(targetUrl);
+      return {
+        content: [
+          {
+            type: "text",
+            text: `🌐 Google Flow opened/focused in your active Chrome browser via Companion Extension!\n• Target URL: ${targetUrl}\n• Mode: Live Chrome Extension WebSocket Bridge (ws://127.0.0.1:18885)\n• No command-line flags or secondary profile required.`
+          }
+        ]
+      };
+    }
+
     const browser = await getBrowser(false);
     const pages = await browser.pages();
     const page = pages.length > 0 ? pages[0] : await browser.newPage();
@@ -706,6 +720,12 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
   }
 
   if (name === "labs_status") {
+    const extConnected = extensionBridge.isConnected();
+    let extStatus = null;
+    if (extConnected) {
+      try { extStatus = await extensionBridge.getStatus(); } catch {}
+    }
+
     let browser = browserInstance;
     if (!browser || !browser.isConnected()) {
       try { browser = await getBrowser(false); } catch {}
@@ -738,11 +758,21 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
       } catch {}
     }
 
+    const flowTitle = extStatus?.flowDetails?.title || flowDetails?.title || (extStatus?.hasFlowTab ? "Active (Flow Tab Detected)" : "Not active");
+    const isUltra = extStatus?.flowDetails?.isUltra || flowDetails?.isUltra;
+
     return {
       content: [
         {
           type: "text",
-          text: `Google Labs & Flow MCP Status:\n- Remote CDP Connected: ${!!isConnected}\n- Profile: ${LABS_PROFILE_DIR}\n- Flow Project Active: ${flowDetails ? flowDetails.title : "Not active"}\n- Subscription: ${flowDetails?.isUltra ? "Google ULTRA Subscriber" : "Standard"}\n- Active Models: Omni 1.1 Flash (Video), Nano Banana 2 (Image)\n- Current Queue Activity: ${flowDetails?.isQueued ? "Active video rendering in queue" : "Idle"}`
+          text: `Google Labs & Flow MCP Status:\n` +
+                `- Companion Chrome Extension: ${extConnected ? "🟢 CONNECTED (Active Browser Control)" : "⚪ Disconnected (Load unpacked in chrome://extensions)"}\n` +
+                `- Extension Bridge Port: ws://127.0.0.1:18885\n` +
+                `- Remote CDP Port 9222: ${isConnected ? "🟢 Connected" : "⚪ Standby"}\n` +
+                `- Flow Project Active: ${flowTitle}\n` +
+                `- Subscription: ${isUltra ? "Google ULTRA Subscriber" : "Standard"}\n` +
+                `- Active Models: Omni 1.1 Flash (Video), Nano Banana 2 (Image)\n` +
+                `- Current Queue Activity: ${flowDetails?.isQueued ? "Active video rendering in queue" : "Idle"}`
         }
       ]
     };
@@ -754,6 +784,42 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
     const duration = args.duration || "10s";
     const waitForCompletion = args.waitForCompletion ?? false;
     const outputPath = args.outputPath || path.join(process.cwd(), `labs_video_${Date.now()}.png`);
+    const fullVideoPrompt = `Generate a cinematic video in ${aspectRatio} aspect ratio (${duration}): ${prompt}`;
+
+    if (extensionBridge.isConnected()) {
+      try {
+        await extensionBridge.openOrFocusFlow();
+        await new Promise(r => setTimeout(r, 600));
+        await extensionBridge.injectPrompt(fullVideoPrompt);
+        await new Promise(r => setTimeout(r, 800));
+
+        let snapInfo = null;
+        try {
+          const snap = await extensionBridge.captureScreenshot();
+          if (snap && snap.dataUrl) {
+            const base64Data = snap.dataUrl.replace(/^data:image\/\w+;base64,/, "");
+            fs.writeFileSync(outputPath, Buffer.from(base64Data, "base64"));
+            snapInfo = outputPath;
+          }
+        } catch {}
+
+        return {
+          content: [
+            {
+              type: "text",
+              text: `🎬 Video Generation Dispatched via Chrome Companion Extension!\n` +
+                    `• Prompt: "${fullVideoPrompt}"\n` +
+                    `• Target Tab: Active Google Flow Session\n` +
+                    `• Controller: Companion Extension (No port 9222 required)\n` +
+                    `• Snapshot Saved: ${snapInfo || "N/A"}\n\n` +
+                    `Video queued directly inside your active browser session.`
+            }
+          ]
+        };
+      } catch (extErr) {
+        console.warn("Extension dispatch failed, falling back to CDP:", extErr.message);
+      }
+    }
 
     const browser = await getBrowser(false);
     const flowPage = await findFlowPage(browser);
@@ -763,7 +829,6 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
       await flowPage.waitForSelector(".ProseMirror", { timeout: 20000 });
 
       // 2. Inject the prompt
-      const fullVideoPrompt = `Generate a cinematic video in ${aspectRatio} aspect ratio (${duration}): ${prompt}`;
       await flowPage.evaluate((pText) => {
         const editor = document.querySelector(".ProseMirror");
         editor.focus();
