@@ -1180,11 +1180,9 @@ async function main() {
   console.error("Google Labs & Flow MCP Server running over Stdio");
 }
 
-if (require.main === module) {
-  main().catch(err => {
-    console.error("Fatal error:", err);
-    process.exit(1);
-  });
-}
+main().catch((err) => {
+  console.error("Fatal error:", err);
+  process.exit(1);
+});
 
 module.exports = { evaluateCreativeAsset, server };
